@@ -39,8 +39,10 @@ export function getConfig() {
 
   const approvalPolicy = emptyToNull(process.env.CODEX_APPROVAL_POLICY) || "on-request";
   const sandbox = emptyToNull(process.env.CODEX_SANDBOX) || "workspace-write";
+  const telegramCavemanMode = emptyToNull(process.env.CODEX_TELEGRAM_CAVEMAN_MODE) || "ultra";
   validateChoice("CODEX_APPROVAL_POLICY", approvalPolicy, ["untrusted", "on-request", "never", "on-failure"]);
   validateChoice("CODEX_SANDBOX", sandbox, ["read-only", "workspace-write", "danger-full-access"]);
+  validateChoice("CODEX_TELEGRAM_CAVEMAN_MODE", telegramCavemanMode, ["off", "lite", "full", "ultra", "wenyan-lite", "wenyan-full", "wenyan-ultra"]);
 
   return {
     telegramToken: token,
@@ -51,6 +53,7 @@ export function getConfig() {
     model: emptyToNull(process.env.CODEX_MODEL),
     approvalPolicy,
     sandbox,
+    telegramCavemanMode,
     dataDir: resolve(process.env.DATA_DIR || "data"),
   };
 }

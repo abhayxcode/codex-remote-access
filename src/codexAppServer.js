@@ -65,22 +65,23 @@ export class CodexAppServer extends EventEmitter {
     this.notify("initialized");
   }
 
-  async startThread({ cwd, model, approvalPolicy, sandbox }) {
+  async startThread({ cwd, model, approvalPolicy, sandbox, developerInstructions }) {
     const params = clean({
       cwd,
       model,
       approvalPolicy,
       sandbox,
+      developerInstructions,
       threadSource: "telegram",
       serviceName: "telegram-codex-remote",
     });
     return this.request("thread/start", params);
   }
 
-  async resumeThread({ threadId, cwd, model, approvalPolicy, sandbox }) {
+  async resumeThread({ threadId, cwd, model, approvalPolicy, sandbox, developerInstructions }) {
     return this.request(
       "thread/resume",
-      clean({ threadId, cwd, model, approvalPolicy, sandbox }),
+      clean({ threadId, cwd, model, approvalPolicy, sandbox, developerInstructions }),
     );
   }
 

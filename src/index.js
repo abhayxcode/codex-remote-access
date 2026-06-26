@@ -152,6 +152,7 @@ async function newThread(chatId, cwd) {
     model: settings.model,
     approvalPolicy: settings.approvalPolicy,
     sandbox: settings.sandbox,
+    developerInstructions: telegramDeveloperInstructions(),
   });
   const threadId = result.thread.id;
   state.updateChat(chatId, { threadId, cwd: result.cwd || safeCwd, activeTurnId: null });
@@ -191,6 +192,7 @@ async function resumeThread(chatId, threadId) {
     model: settings.model,
     approvalPolicy: settings.approvalPolicy,
     sandbox: settings.sandbox,
+    developerInstructions: telegramDeveloperInstructions(),
   });
 
   if (result.cwd && !isAllowedPath(result.cwd)) {
@@ -238,6 +240,7 @@ async function showStatus(chatId) {
       `Model: ${settings.model || "(default)"}`,
       `Approval: ${settings.approvalPolicy}`,
       `Sandbox: ${settings.sandbox}`,
+      `TG Caveman: ${config.telegramCavemanMode}`,
       `Active turn: ${chat.activeTurnId || "(none)"}`,
       chat.threadId ? `CLI resume: codex resume ${chat.threadId}` : null,
     ]
@@ -270,7 +273,6 @@ async function sendToCodex(chatId, text) {
 
   if (chat.activeTurnId) {
     await codex.steerTurn({ threadId: chat.threadId, turnId: chat.activeTurnId, text });
-    await telegram.sendMessage(chatId, "Added to the active Codex turn.");
     return;
   }
 
@@ -283,7 +285,6 @@ async function sendToCodex(chatId, text) {
   });
   const turnId = result.turn.id;
   state.updateChat(chatId, { activeTurnId: turnId });
-  await telegram.sendMessage(chatId, `Codex started turn ${turnId}.`);
 }
 
 async function showSettings(chatId) {
@@ -295,6 +296,7 @@ async function showSettings(chatId) {
       `Model: ${settings.model || "(default)"}`,
       `Approval: ${settings.approvalPolicy}`,
       `Sandbox: ${settings.sandbox}`,
+      `TG Caveman: ${config.telegramCavemanMode}`,
       `CWD: ${displayPath(selectedWorkspaceCwd(chatId))}`,
       "",
       "Commands:",
@@ -440,22 +442,13 @@ async function handleCodexNotification(message) {
     return;
   }
 
-  if (message.method === "item/started") {
-    const item = params.item || {};
-    const label = itemLabel(item);
-    if (label) await telegram.sendMessage(chatId, label);
-    return;
-  }
-
   if (message.method === "turn/completed") {
     flushTurnBuffers(params.threadId, params.turn?.id, chatId);
     state.updateChat(chatId, { activeTurnId: null });
-    const status = params.turn?.status || "completed";
-    await telegram.sendMessage(chatId, `Codex turn ${status}.`);
     return;
   }
 
-  if (message.method === "error" || message.method === "warning") {
+  if (message.method === "error") {
     await telegram.sendMessage(chatId, `${message.method}: ${redactPaths(params.message || JSON.stringify(params))}`);
   }
 }
@@ -466,14 +459,6 @@ function flushTurnBuffers(threadId, turnId, chatId) {
     buffersByTurn.delete(key);
     if (value.trim()) void telegram.sendMessage(chatId, value);
   }
-}
-
-function itemLabel(item) {
-  if (!item || !item.type) return null;
-  if (item.type === "commandExecution") return `Running command: ${item.command || "(command)"}`;
-  if (item.type === "fileChange") return `Editing file: ${item.path ? displayPath(item.path) : "(file)"}`;
-  if (item.type === "mcpToolCall") return `Calling tool: ${item.name || "(tool)"}`;
-  return null;
 }
 
 function helpText() {
@@ -674,6 +659,11 @@ function getChatSettings(chatId) {
 function normalizeDefault(value) {
   if (!value || value === "default" || value === "none" || value === "unset") return null;
   return value;
+}
+
+function telegramDeveloperInstructions() {
+  if (config.telegramCavemanMode === "off") return null;
+  return `Use caveman ${config.telegramCavemanMode} mode.`;
 }
 
 function sleep(ms) {
