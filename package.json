@@ -1,0 +1,14 @@
+{
+  "name": "codex-remote-access",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Telegram remote UI for persistent Codex app-server sessions.",
+  "scripts": {
+    "start": "node src/index.js",
+    "check": "node --check src/*.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
