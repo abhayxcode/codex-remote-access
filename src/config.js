@@ -40,6 +40,8 @@ export function getConfig() {
   const approvalPolicy = emptyToNull(process.env.CODEX_APPROVAL_POLICY) || "on-request";
   const sandbox = emptyToNull(process.env.CODEX_SANDBOX) || "workspace-write";
   const telegramCavemanMode = emptyToNull(process.env.CODEX_TELEGRAM_CAVEMAN_MODE) || "ultra";
+  const rateLimitWindowSeconds = parsePositiveInt("TELEGRAM_RATE_LIMIT_WINDOW_SECONDS", process.env.TELEGRAM_RATE_LIMIT_WINDOW_SECONDS, 60);
+  const rateLimitMaxUpdates = parsePositiveInt("TELEGRAM_RATE_LIMIT_MAX_UPDATES", process.env.TELEGRAM_RATE_LIMIT_MAX_UPDATES, 20);
   validateChoice("CODEX_APPROVAL_POLICY", approvalPolicy, ["untrusted", "on-request", "never", "on-failure"]);
   validateChoice("CODEX_SANDBOX", sandbox, ["read-only", "workspace-write", "danger-full-access"]);
   validateChoice("CODEX_TELEGRAM_CAVEMAN_MODE", telegramCavemanMode, ["off", "lite", "full", "ultra", "wenyan-lite", "wenyan-full", "wenyan-ultra"]);
@@ -54,6 +56,8 @@ export function getConfig() {
     approvalPolicy,
     sandbox,
     telegramCavemanMode,
+    rateLimitWindowSeconds,
+    rateLimitMaxUpdates,
     dataDir: resolve(process.env.DATA_DIR || "data"),
   };
 }
@@ -66,4 +70,13 @@ function validateChoice(name, value, allowed) {
   if (!allowed.includes(value)) {
     throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
   }
+}
+
+function parsePositiveInt(name, value, fallback) {
+  if (value === undefined || value === null || value === "") return fallback;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }

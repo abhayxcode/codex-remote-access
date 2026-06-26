@@ -13,6 +13,7 @@ const codex = new CodexAppServer({ cwd: config.defaultCwd, codexBin: config.code
 const activeChatsByThread = new Map();
 const buffersByTurn = new Map();
 const workdirTokens = new Map();
+const rateLimitBuckets = new Map();
 const WORKDIR_PAGE_SIZE = 20;
 
 codex.on("stderr", (text) => process.stderr.write(text));
@@ -69,6 +70,7 @@ async function handleUpdate(update) {
     await telegram.sendMessage(chatId, "This bot is not authorized for your Telegram user.");
     return;
   }
+  if (!(await checkRateLimit({ userId, chatId }))) return;
 
   if (text.startsWith("/")) {
     try {
@@ -368,6 +370,7 @@ async function handleCallbackQuery(query) {
     await telegram.answerCallbackQuery(query.id, "Not authorized");
     return;
   }
+  if (!(await checkRateLimit({ userId, callbackQueryId: query.id }))) return;
 
   const [kind, token] = String(query.data || "").split("|");
   if (kind !== "wd") {
@@ -506,6 +509,31 @@ function commandForButton(text) {
     help: "/help",
   };
   return commands[text.trim().toLowerCase()] || null;
+}
+
+async function checkRateLimit({ userId, chatId = null, callbackQueryId = null }) {
+  const now = Date.now();
+  const windowMs = config.rateLimitWindowSeconds * 1000;
+  const bucket = rateLimitBuckets.get(userId) || { resetAt: now + windowMs, count: 0 };
+
+  if (now >= bucket.resetAt) {
+    bucket.resetAt = now + windowMs;
+    bucket.count = 0;
+  }
+
+  bucket.count += 1;
+  rateLimitBuckets.set(userId, bucket);
+
+  if (bucket.count <= config.rateLimitMaxUpdates) return true;
+
+  const retrySeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+  const message = `Rate limit hit. Try again in ${retrySeconds}s.`;
+  if (callbackQueryId) {
+    await telegram.answerCallbackQuery(callbackQueryId, message);
+  } else if (chatId) {
+    await telegram.sendMessage(chatId, message, mainKeyboard());
+  }
+  return false;
 }
 
 function buildWorkdirPicker(cwd, page = 0) {
