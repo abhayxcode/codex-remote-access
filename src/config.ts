@@ -62,17 +62,17 @@ export function getConfig() {
   };
 }
 
-function emptyToNull(value) {
+function emptyToNull(value: string | undefined) {
   return value && value.trim() ? value.trim() : null;
 }
 
-function validateChoice(name, value, allowed) {
+function validateChoice(name: string, value: string, allowed: string[]) {
   if (!allowed.includes(value)) {
     throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
   }
 }
 
-function parsePositiveInt(name, value, fallback) {
+function parsePositiveInt(name: string, value: string | undefined, fallback: number) {
   if (value === undefined || value === null || value === "") return fallback;
   const parsed = Number.parseInt(value, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) {

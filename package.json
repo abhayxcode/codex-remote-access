@@ -5,10 +5,18 @@
   "type": "module",
   "description": "Telegram remote UI for persistent Codex app-server sessions.",
   "scripts": {
-    "start": "node src/index.js",
-    "check": "node --check src/*.js"
+    "prestart": "npm run build",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "check": "tsc -p tsconfig.json --noEmit"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.1",
+    "tsx": "^4.20.3",
+    "typescript": "^5.9.2"
   }
 }

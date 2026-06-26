@@ -2,18 +2,46 @@ import { getConfig } from "./config.js";
 import { CodexAppServer } from "./codexAppServer.js";
 import { StateStore } from "./state.js";
 import { TelegramClient, getMessageText } from "./telegram.js";
+import type { TelegramCallbackQuery, TelegramChatId, TelegramUpdate } from "./telegram.js";
 import { existsSync, realpathSync, readdirSync, statSync } from "node:fs";
 import { basename, relative, resolve } from "node:path";
+
+type CodexNotification = {
+  method?: string;
+  params?: Record<string, any>;
+};
+
+type RateLimitBucket = {
+  resetAt: number;
+  count: number;
+};
+
+type WorkdirAction = "open" | "page" | "select";
+
+type WorkdirToken = {
+  path: string;
+  action?: WorkdirAction;
+  page?: number;
+};
+
+type InlineButton = {
+  text: string;
+  callback_data: string;
+};
+
+type DirectoryValidation =
+  | { ok: true; path: string }
+  | { ok: false; message: string };
 
 const config = getConfig();
 const telegram = new TelegramClient(config.telegramToken);
 const state = new StateStore(config.dataDir);
 const codex = new CodexAppServer({ cwd: config.defaultCwd, codexBin: config.codexBin });
 
-const activeChatsByThread = new Map();
-const buffersByTurn = new Map();
-const workdirTokens = new Map();
-const rateLimitBuckets = new Map();
+const activeChatsByThread = new Map<string, string>();
+const buffersByTurn = new Map<string, string>();
+const workdirTokens = new Map<string, WorkdirToken>();
+const rateLimitBuckets = new Map<string, RateLimitBucket>();
 const WORKDIR_PAGE_SIZE = 20;
 
 codex.on("stderr", (text) => process.stderr.write(text));
@@ -54,7 +82,7 @@ while (true) {
   }
 }
 
-async function handleUpdate(update) {
+async function handleUpdate(update: TelegramUpdate) {
   if (update.callback_query) {
     await handleCallbackQuery(update.callback_query);
     return;
@@ -98,7 +126,7 @@ async function handleUpdate(update) {
   }
 }
 
-async function handleCommand(chatId, text) {
+async function handleCommand(chatId: TelegramChatId, text: string) {
   const [command, ...rest] = text.trim().split(/\s+/);
   const arg = rest.join(" ").trim();
 
@@ -145,7 +173,7 @@ async function handleCommand(chatId, text) {
   }
 }
 
-async function newThread(chatId, cwd) {
+async function newThread(chatId: TelegramChatId, cwd: string) {
   const safeCwd = requireWorkspaceDirectory(cwd);
   await telegram.sendChatAction(chatId);
   const settings = getChatSettings(chatId);
@@ -166,7 +194,7 @@ async function newThread(chatId, cwd) {
   );
 }
 
-async function resumeThread(chatId, threadId) {
+async function resumeThread(chatId: TelegramChatId, threadId: string) {
   if (!threadId) {
     await telegram.sendMessage(chatId, "Usage: /resume <codex-thread-id>");
     return;
@@ -214,7 +242,7 @@ async function resumeThread(chatId, threadId) {
   await telegram.sendMessage(chatId, `Resumed Codex thread:\n${result.thread.id}`, mainKeyboard());
 }
 
-async function listSessions(chatId) {
+async function listSessions(chatId: TelegramChatId) {
   await telegram.sendChatAction(chatId);
   const cwd = requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
   const result = await codex.listThreads({ cwd, limit: 10 });
@@ -230,7 +258,7 @@ async function listSessions(chatId) {
   await telegram.sendMessage(chatId, `Recent Codex sessions in:\n${displayPath(cwd)}\n\n${rows.join("\n\n")}`, mainKeyboard());
 }
 
-async function showStatus(chatId) {
+async function showStatus(chatId: TelegramChatId) {
   const chat = state.getChat(chatId);
   const settings = getChatSettings(chatId);
   await telegram.sendMessage(
@@ -252,7 +280,7 @@ async function showStatus(chatId) {
   );
 }
 
-async function stopTurn(chatId) {
+async function stopTurn(chatId: TelegramChatId) {
   const chat = state.getChat(chatId);
   if (!chat.threadId || !chat.activeTurnId) {
     await telegram.sendMessage(chatId, "No active Codex turn to stop.", mainKeyboard());
@@ -263,13 +291,14 @@ async function stopTurn(chatId) {
   await telegram.sendMessage(chatId, "Stop requested.", mainKeyboard());
 }
 
-async function sendToCodex(chatId, text) {
+async function sendToCodex(chatId: TelegramChatId, text: string) {
   let chat = state.getChat(chatId);
   if (!chat.threadId) {
     await newThread(chatId, selectedWorkspaceCwd(chatId));
     chat = state.getChat(chatId);
   }
 
+  if (!chat.threadId) throw new Error("Failed to create Codex thread.");
   activeChatsByThread.set(chat.threadId, String(chatId));
   await telegram.sendChatAction(chatId);
 
@@ -289,7 +318,7 @@ async function sendToCodex(chatId, text) {
   state.updateChat(chatId, { activeTurnId: turnId });
 }
 
-async function showSettings(chatId) {
+async function showSettings(chatId: TelegramChatId) {
   const chat = state.getChat(chatId);
   const settings = getChatSettings(chatId);
   await telegram.sendMessage(
@@ -316,13 +345,13 @@ async function showSettings(chatId) {
   );
 }
 
-async function setModel(chatId, value) {
+async function setModel(chatId: TelegramChatId, value: string) {
   const model = normalizeDefault(value);
   state.updateChat(chatId, { settings: { ...state.getChat(chatId).settings, model } });
   await telegram.sendMessage(chatId, `Model set to: ${model || "(default)"}`, mainKeyboard());
 }
 
-async function setApproval(chatId, value) {
+async function setApproval(chatId: TelegramChatId, value: string) {
   const allowed = new Set(["untrusted", "on-request", "never", "on-failure"]);
   if (!allowed.has(value)) {
     await telegram.sendMessage(chatId, "Usage: /approval untrusted|on-request|never|on-failure", mainKeyboard());
@@ -332,7 +361,7 @@ async function setApproval(chatId, value) {
   await telegram.sendMessage(chatId, `Approval policy set to: ${value}`, mainKeyboard());
 }
 
-async function setSandbox(chatId, value) {
+async function setSandbox(chatId: TelegramChatId, value: string) {
   const allowed = new Set(["read-only", "workspace-write", "danger-full-access"]);
   if (!allowed.has(value)) {
     await telegram.sendMessage(chatId, "Usage: /sandbox read-only|workspace-write|danger-full-access", mainKeyboard());
@@ -342,7 +371,7 @@ async function setSandbox(chatId, value) {
   await telegram.sendMessage(chatId, `Sandbox set to: ${value}`, mainKeyboard());
 }
 
-async function setCwd(chatId, value) {
+async function setCwd(chatId: TelegramChatId, value: string) {
   if (!value || !value.startsWith("/")) {
     await telegram.sendMessage(chatId, "Use /workdir to choose a directory.", mainKeyboard());
     return;
@@ -360,7 +389,7 @@ async function setCwd(chatId, value) {
   await telegram.sendMessage(chatId, `CWD set to:\n${displayPath(cwd.path)}`, mainKeyboard());
 }
 
-async function handleCallbackQuery(query) {
+async function handleCallbackQuery(query: TelegramCallbackQuery) {
   const chatId = query.message?.chat?.id;
   const messageId = query.message?.message_id;
   if (!chatId || !messageId) return;
@@ -405,7 +434,7 @@ async function handleCallbackQuery(query) {
   await renderWorkdirPicker(chatId, messageId, validation.path, 0);
 }
 
-async function showWorkdirPicker(chatId, cwd) {
+async function showWorkdirPicker(chatId: TelegramChatId, cwd: string) {
   const validation = validateAllowedDirectory(cwd);
   if (!validation.ok) {
     await telegram.sendMessage(chatId, validation.message, mainKeyboard());
@@ -418,12 +447,12 @@ async function showWorkdirPicker(chatId, cwd) {
   });
 }
 
-async function renderWorkdirPicker(chatId, messageId, cwd, page = 0) {
+async function renderWorkdirPicker(chatId: TelegramChatId, messageId: number, cwd: string, page = 0) {
   const view = buildWorkdirPicker(cwd, page);
   await telegram.editMessageText(chatId, messageId, view.text, { reply_markup: view.replyMarkup });
 }
 
-async function handleCodexNotification(message) {
+async function handleCodexNotification(message: CodexNotification) {
   const params = message.params || {};
   const threadId = params.threadId;
   const chatId = threadId ? activeChatsByThread.get(threadId) : null;
@@ -456,7 +485,7 @@ async function handleCodexNotification(message) {
   }
 }
 
-function flushTurnBuffers(threadId, turnId, chatId) {
+function flushTurnBuffers(threadId: string, turnId: string, chatId: TelegramChatId) {
   for (const [key, value] of buffersByTurn.entries()) {
     if (!key.startsWith(`${threadId}:${turnId}:`)) continue;
     buffersByTurn.delete(key);
@@ -498,7 +527,7 @@ function mainKeyboard() {
   };
 }
 
-function commandForButton(text) {
+function commandForButton(text: string) {
   const commands = {
     workdir: "/workdir",
     sessions: "/sessions",
@@ -511,7 +540,15 @@ function commandForButton(text) {
   return commands[text.trim().toLowerCase()] || null;
 }
 
-async function checkRateLimit({ userId, chatId = null, callbackQueryId = null }) {
+async function checkRateLimit({
+  userId,
+  chatId = null,
+  callbackQueryId = null,
+}: {
+  userId: string;
+  chatId?: TelegramChatId | null;
+  callbackQueryId?: string | null;
+}) {
   const now = Date.now();
   const windowMs = config.rateLimitWindowSeconds * 1000;
   const bucket = rateLimitBuckets.get(userId) || { resetAt: now + windowMs, count: 0 };
@@ -536,13 +573,13 @@ async function checkRateLimit({ userId, chatId = null, callbackQueryId = null })
   return false;
 }
 
-function buildWorkdirPicker(cwd, page = 0) {
+function buildWorkdirPicker(cwd: string, page = 0) {
   const allDirs = listChildDirectories(cwd);
   const pageCount = Math.max(1, Math.ceil(allDirs.length / WORKDIR_PAGE_SIZE));
   const safePage = Math.min(Math.max(page, 0), pageCount - 1);
   const start = safePage * WORKDIR_PAGE_SIZE;
   const dirs = allDirs.slice(start, start + WORKDIR_PAGE_SIZE);
-  const rows = [];
+  const rows: InlineButton[][] = [];
 
   if (cwd !== config.parentDir) {
     rows.push([{ text: "..", callback_data: workdirCallback(resolve(cwd, ".."), { action: "open" }) }]);
@@ -552,7 +589,7 @@ function buildWorkdirPicker(cwd, page = 0) {
     rows.push([{ text: `${basename(dir)}/`, callback_data: workdirCallback(dir, { action: "open" }) }]);
   }
 
-  const pageButtons = [];
+  const pageButtons: InlineButton[] = [];
   if (safePage > 0) {
     pageButtons.push({ text: "Prev", callback_data: workdirCallback(cwd, { action: "page", page: safePage - 1 }) });
   }
@@ -581,7 +618,7 @@ function buildWorkdirPicker(cwd, page = 0) {
   };
 }
 
-function listChildDirectories(dir) {
+function listChildDirectories(dir: string) {
   return readdirSync(dir, { withFileTypes: true })
     .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
     .map((entry) => resolve(dir, entry.name))
@@ -596,13 +633,13 @@ function listChildDirectories(dir) {
     .sort((a, b) => basename(a).localeCompare(basename(b)));
 }
 
-function workdirCallback(path, metadata = {}) {
+function workdirCallback(path: string, metadata: Omit<WorkdirToken, "path"> = {}) {
   const token = Math.random().toString(36).slice(2, 10);
   workdirTokens.set(token, { path, ...metadata });
   return `wd|${token}`;
 }
 
-function validateAllowedDirectory(value) {
+function validateAllowedDirectory(value: string): DirectoryValidation {
   const path = resolve(value);
   if (!isAllowedPath(path)) {
     return { ok: false, message: "Path is outside the allowed parent." };
@@ -623,13 +660,13 @@ function validateAllowedDirectory(value) {
   return { ok: true, path: realPath };
 }
 
-function requireAllowedDirectory(value) {
+function requireAllowedDirectory(value: string) {
   const validation = validateAllowedDirectory(value);
   if (!validation.ok) throw new Error(validation.message);
   return validation.path;
 }
 
-function requireWorkspaceDirectory(value) {
+function requireWorkspaceDirectory(value: string) {
   const path = requireAllowedDirectory(value);
   if (path === config.parentDir) {
     throw new Error("Choose a project directory inside / before starting or listing sessions.");
@@ -637,20 +674,20 @@ function requireWorkspaceDirectory(value) {
   return path;
 }
 
-function selectedWorkspaceCwd(chatId) {
+function selectedWorkspaceCwd(chatId: TelegramChatId) {
   const cwd = state.getChat(chatId).cwd;
   if (!cwd || cwd === config.parentDir) return config.defaultCwd;
   return cwd;
 }
 
-function isAllowedPath(path) {
+function isAllowedPath(path: string) {
   const resolvedPath = resolve(path);
   const resolvedParent = resolve(config.parentDir);
   const rel = relative(resolvedParent, resolvedPath);
   return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && rel !== "..");
 }
 
-function displayPath(path) {
+function displayPath(path: string) {
   const resolvedPath = resolve(path);
   const rel = relative(config.parentDir, resolvedPath);
   if (rel === "") return "/";
@@ -658,11 +695,11 @@ function displayPath(path) {
   return `/${rel}`;
 }
 
-function redactPaths(text) {
+function redactPaths(text: string) {
   return String(text).split(config.parentDir).join("");
 }
 
-async function findThreadInSelectedCwd(chatId, threadId) {
+async function findThreadInSelectedCwd(chatId: TelegramChatId, threadId: string) {
   const cwd = requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
   let cursor = null;
   for (let page = 0; page < 5; page += 1) {
@@ -675,7 +712,7 @@ async function findThreadInSelectedCwd(chatId, threadId) {
   return null;
 }
 
-function getChatSettings(chatId) {
+function getChatSettings(chatId: TelegramChatId) {
   const settings = state.getChat(chatId).settings || {};
   return {
     model: settings.model ?? config.model,
@@ -684,7 +721,7 @@ function getChatSettings(chatId) {
   };
 }
 
-function normalizeDefault(value) {
+function normalizeDefault(value: string) {
   if (!value || value === "default" || value === "none" || value === "unset") return null;
   return value;
 }
@@ -694,6 +731,6 @@ function telegramDeveloperInstructions() {
   return `Use caveman ${config.telegramCavemanMode} mode.`;
 }
 
-function sleep(ms) {
+function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -1,8 +1,29 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+export type ChatSettings = {
+  model?: string | null;
+  approvalPolicy?: string;
+  sandbox?: string;
+};
+
+export type ChatState = {
+  threadId: string | null;
+  cwd: string | null;
+  activeTurnId: string | null;
+  settings: ChatSettings;
+};
+
+type PersistedState = {
+  chats: Record<string, ChatState>;
+};
+
 export class StateStore {
-  constructor(dataDir) {
+  private dataDir: string;
+  private path: string;
+  private state: PersistedState;
+
+  constructor(dataDir: string) {
     this.dataDir = dataDir;
     this.path = join(dataDir, "state.json");
     this.state = { chats: {} };
@@ -25,7 +46,7 @@ export class StateStore {
     renameSync(tmp, this.path);
   }
 
-  getChat(chatId) {
+  getChat(chatId: string | number) {
     const key = String(chatId);
     if (!this.state.chats[key]) {
       this.state.chats[key] = {
@@ -39,7 +60,7 @@ export class StateStore {
     return this.state.chats[key];
   }
 
-  updateChat(chatId, patch) {
+  updateChat(chatId: string | number, patch: Partial<ChatState>) {
     const chat = this.getChat(chatId);
     Object.assign(chat, patch);
     this.save();

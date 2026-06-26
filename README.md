@@ -18,6 +18,7 @@ thread resumable from the Codex CLI.
 
 ```bash
 cp .env.example .env
+npm install
 ```
 
 Edit `.env`:
@@ -41,6 +42,13 @@ Run:
 
 ```bash
 npm start
+```
+
+`npm start` compiles TypeScript into `dist/` before launching the bot. For local
+development, run TypeScript directly with:
+
+```bash
+npm run dev
 ```
 
 ## Telegram Commands
