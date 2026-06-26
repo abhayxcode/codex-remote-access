@@ -27,6 +27,7 @@ TELEGRAM_BOT_TOKEN=123456:replace-me
 TELEGRAM_ALLOWED_USER_IDS=123456789
 CODEX_BIN=codex
 CODEX_DEFAULT_CWD=/absolute/path/to/repo
+CODEX_PARENT_DIR=/absolute/path/to/parent
 ```
 
 If `npm start` fails with `spawn codex ENOENT`, set `CODEX_BIN` to the absolute
@@ -46,13 +47,16 @@ npm start
 
 - `/new [cwd]` starts a new persistent Codex thread.
 - `/resume <thread-id>` attaches the Telegram chat to an existing Codex thread
-  without changing that thread's recorded working directory.
-- `/sessions` lists recent local Codex sessions.
+  only when that thread belongs to the currently selected working directory.
+- `/sessions` lists recent local Codex sessions in the currently selected
+  working directory.
+- `/workdir` opens a button-based directory picker under `CODEX_PARENT_DIR`.
 - `/settings` shows the Codex defaults for this Telegram chat.
 - `/model <model|default>` sets the model for future turns.
 - `/approval <policy>` sets the approval policy.
 - `/sandbox <mode>` sets the sandbox mode for future threads.
-- `/cwd <path>` sets the working directory used by `/new` and future turns.
+- `/cwd <path>` sets the working directory used by `/new` and future turns. The
+  path must be inside `CODEX_PARENT_DIR`.
 - `/status` shows the current thread mapping and CLI resume command.
 - `/stop` interrupts the active Codex turn.
 - Any normal message is sent to the current Codex thread.
@@ -76,6 +80,9 @@ The thread ID is shown after `/new` and in `/status`.
 Keep the bot process on a trusted machine. The Telegram bot can ask Codex to read
 and edit files in the configured workspace, so `TELEGRAM_ALLOWED_USER_IDS` is
 required and should contain only your Telegram user ID.
+
+Set `CODEX_PARENT_DIR` to the highest directory Telegram is allowed to browse.
+The bot validates real paths, so symlinks cannot be used to escape this parent.
 
 By default this project starts Codex with:
 

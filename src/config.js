@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 export function loadDotEnv(path = ".env") {
@@ -11,7 +11,7 @@ export function loadDotEnv(path = ".env") {
     if (eq === -1) continue;
     const key = trimmed.slice(0, eq).trim();
     const value = trimmed.slice(eq + 1).trim().replace(/^['"]|['"]$/g, "");
-    if (key && process.env[key] === undefined) process.env[key] = value;
+    if (key) process.env[key] = value;
   }
 }
 
@@ -34,18 +34,33 @@ export function getConfig() {
     throw new Error("TELEGRAM_ALLOWED_USER_IDS is required. Use your numeric Telegram user ID.");
   }
 
+  const parentDir = realpathSync(resolve(process.env.CODEX_PARENT_DIR || process.env.CODEX_DEFAULT_CWD || process.cwd()));
+  const defaultCwd = realpathSync(resolve(process.env.CODEX_DEFAULT_CWD || process.cwd()));
+
+  const approvalPolicy = emptyToNull(process.env.CODEX_APPROVAL_POLICY) || "on-request";
+  const sandbox = emptyToNull(process.env.CODEX_SANDBOX) || "workspace-write";
+  validateChoice("CODEX_APPROVAL_POLICY", approvalPolicy, ["untrusted", "on-request", "never", "on-failure"]);
+  validateChoice("CODEX_SANDBOX", sandbox, ["read-only", "workspace-write", "danger-full-access"]);
+
   return {
     telegramToken: token,
     allowedUsers,
     codexBin: emptyToNull(process.env.CODEX_BIN) || "codex",
-    defaultCwd: resolve(process.env.CODEX_DEFAULT_CWD || process.cwd()),
+    defaultCwd,
+    parentDir,
     model: emptyToNull(process.env.CODEX_MODEL),
-    approvalPolicy: emptyToNull(process.env.CODEX_APPROVAL_POLICY) || "on-request",
-    sandbox: emptyToNull(process.env.CODEX_SANDBOX) || "workspace-write",
+    approvalPolicy,
+    sandbox,
     dataDir: resolve(process.env.DATA_DIR || "data"),
   };
 }
 
 function emptyToNull(value) {
   return value && value.trim() ? value.trim() : null;
+}
+
+function validateChoice(name, value, allowed) {
+  if (!allowed.includes(value)) {
+    throw new Error(`${name} must be one of: ${allowed.join(", ")}`);
+  }
 }

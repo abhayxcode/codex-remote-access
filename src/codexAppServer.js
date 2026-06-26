@@ -84,8 +84,8 @@ export class CodexAppServer extends EventEmitter {
     );
   }
 
-  async listThreads({ cwd, limit = 10 } = {}) {
-    return this.request("thread/list", clean({ cwd, limit, archived: false }));
+  async listThreads({ cwd, limit = 10, cursor = null } = {}) {
+    return this.request("thread/list", clean({ cwd, limit, cursor, archived: false }));
   }
 
   async startTurn({ threadId, text, cwd, model, approvalPolicy }) {

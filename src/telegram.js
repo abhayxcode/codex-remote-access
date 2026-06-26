@@ -11,7 +11,7 @@ export class TelegramClient {
     const url = new URL(`${this.baseUrl}/getUpdates`);
     url.searchParams.set("timeout", "30");
     url.searchParams.set("offset", String(this.offset));
-    url.searchParams.set("allowed_updates", JSON.stringify(["message"]));
+    url.searchParams.set("allowed_updates", JSON.stringify(["message", "callback_query"]));
     const res = await fetch(url);
     const payload = await res.json();
     if (!payload.ok) throw new Error(`Telegram getUpdates failed: ${payload.description}`);
@@ -41,6 +41,24 @@ export class TelegramClient {
     } catch {
       // Non-critical; Telegram may reject actions during transient chat states.
     }
+  }
+
+  async editMessageText(chatId, messageId, text, options = {}) {
+    return this.call("editMessageText", {
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      disable_web_page_preview: true,
+      ...options,
+    });
+  }
+
+  async answerCallbackQuery(callbackQueryId, text = "") {
+    return this.call("answerCallbackQuery", {
+      callback_query_id: callbackQueryId,
+      text,
+      show_alert: false,
+    });
   }
 
   async call(method, body) {
