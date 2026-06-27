@@ -1,85 +1,68 @@
-import { getConfig } from "./config.js";
-import { CodexAppServer } from "./codexAppServer.js";
-import { StateStore } from "./state.js";
-import { TelegramClient, getMessageText } from "./telegram.js";
-import type { TelegramCallbackQuery, TelegramChatId, TelegramUpdate } from "./telegram.js";
-import { existsSync, realpathSync, readdirSync, statSync } from "node:fs";
-import { basename, relative, resolve } from "node:path";
+import { CodexAgent } from "../agents/codex/CodexAgent.js";
+import { getConfig } from "../config/config.js";
+import { commandForButton } from "../core/commands.js";
+import { RateLimiter } from "../security/RateLimiter.js";
+import { StateStore } from "../state/StateStore.js";
+import { TelegramClient, getMessageText } from "../transports/telegram/TelegramClient.js";
+import type { TelegramCallbackQuery, TelegramChatId, TelegramUpdate } from "../transports/telegram/TelegramClient.js";
+import { helpText, mainKeyboard } from "../transports/telegram/telegramUi.js";
+import { WorkdirBrowser } from "../workspace/WorkdirBrowser.js";
+import type { WorkdirToken } from "../workspace/WorkdirBrowser.js";
+import { WorkspaceScope } from "../workspace/WorkspaceScope.js";
+import { sleep } from "../utils/async.js";
 
 type CodexNotification = {
   method?: string;
   params?: Record<string, any>;
 };
 
-type RateLimitBucket = {
-  resetAt: number;
-  count: number;
-};
-
-type WorkdirAction = "open" | "page" | "select";
-
-type WorkdirToken = {
-  path: string;
-  action?: WorkdirAction;
-  page?: number;
-};
-
-type InlineButton = {
-  text: string;
-  callback_data: string;
-};
-
-type DirectoryValidation =
-  | { ok: true; path: string }
-  | { ok: false; message: string };
-
 const config = getConfig();
 const telegram = new TelegramClient(config.telegramToken);
 const state = new StateStore(config.dataDir);
-const codex = new CodexAppServer({ cwd: config.defaultCwd, codexBin: config.codexBin });
+const codex = new CodexAgent({ cwd: config.defaultCwd, codexBin: config.codexBin });
+const workspace = new WorkspaceScope(config.parentDir, config.defaultCwd);
+const workdirBrowser = new WorkdirBrowser(workspace);
+const rateLimiter = new RateLimiter(config.rateLimitWindowSeconds, config.rateLimitMaxUpdates);
 
 const activeChatsByThread = new Map<string, string>();
 const buffersByTurn = new Map<string, string>();
 const workdirTokens = new Map<string, WorkdirToken>();
-const rateLimitBuckets = new Map<string, RateLimitBucket>();
-const WORKDIR_PAGE_SIZE = 20;
 
-codex.on("stderr", (text) => process.stderr.write(text));
-codex.on("error", (error) => {
-  console.error(error.message);
-  if (error.cause) console.error(error.cause.message);
-  process.exit(1);
-});
-codex.on("exit", ({ code, signal }) => {
-  console.error(`codex app-server exited: code=${code} signal=${signal}`);
-  process.exitCode = 1;
-});
-codex.on("notification", (message) => {
-  void handleCodexNotification(message).catch((error) => {
-    console.error("notification handling failed:", error);
+export async function startTelegramCodexApp() {
+  codex.on("stderr", (text) => process.stderr.write(text));
+  codex.on("error", (error) => {
+    console.error(error.message);
+    if (error.cause) console.error(error.cause.message);
+    process.exit(1);
   });
-});
-
-await codex.start();
-console.log("Telegram Codex remote is running.");
-
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => {
-    codex.stop();
-    process.exit(0);
+  codex.on("exit", ({ code, signal }) => {
+    console.error(`codex app-server exited: code=${code} signal=${signal}`);
+    process.exitCode = 1;
   });
+  codex.on("notification", (message) => {
+    void handleCodexNotification(message).catch((error) => {
+      console.error("notification handling failed:", error);
+    });
+  });
+
+  await codex.start();
+  console.log("Telegram Codex remote is running.");
+
+  while (true) {
+    try {
+      const updates = await telegram.poll();
+      for (const update of updates) {
+        await handleUpdate(update);
+      }
+    } catch (error) {
+      console.error(error);
+      await sleep(2000);
+    }
+  }
 }
 
-while (true) {
-  try {
-    const updates = await telegram.poll();
-    for (const update of updates) {
-      await handleUpdate(update);
-    }
-  } catch (error) {
-    console.error(error);
-    await sleep(2000);
-  }
+export function stopTelegramCodexApp() {
+  codex.stop();
 }
 
 async function handleUpdate(update: TelegramUpdate) {
@@ -174,10 +157,10 @@ async function handleCommand(chatId: TelegramChatId, text: string) {
 }
 
 async function newThread(chatId: TelegramChatId, cwd: string) {
-  const safeCwd = requireWorkspaceDirectory(cwd);
+  const safeCwd = workspace.requireWorkspaceDirectory(cwd);
   await telegram.sendChatAction(chatId);
   const settings = getChatSettings(chatId);
-  const result = await codex.startThread({
+  const result = await codex.startSession({
     cwd: safeCwd,
     model: settings.model,
     approvalPolicy: settings.approvalPolicy,
@@ -208,7 +191,7 @@ async function resumeThread(chatId: TelegramChatId, threadId: string) {
       [
         "Refusing to resume that thread because it is not in the current working directory.",
         "",
-        `Current working directory: ${displayPath(state.getChat(chatId).cwd || config.defaultCwd)}`,
+        `Current working directory: ${workspace.displayPath(state.getChat(chatId).cwd || config.defaultCwd)}`,
         "",
         "Use /workdir to choose the thread's directory, then /sessions to list allowed sessions.",
       ].join("\n"),
@@ -217,15 +200,15 @@ async function resumeThread(chatId: TelegramChatId, threadId: string) {
   }
 
   const settings = getChatSettings(chatId);
-  const result = await codex.resumeThread({
-    threadId,
+  const result = await codex.resumeSession({
+    sessionId: threadId,
     model: settings.model,
     approvalPolicy: settings.approvalPolicy,
     sandbox: settings.sandbox,
     developerInstructions: telegramDeveloperInstructions(),
   });
 
-  if (result.cwd && !isAllowedPath(result.cwd)) {
+  if (result.cwd && !workspace.isAllowedPath(result.cwd)) {
     await telegram.sendMessage(
       chatId,
       "Refusing to attach to a session outside the allowed parent.",
@@ -244,18 +227,18 @@ async function resumeThread(chatId: TelegramChatId, threadId: string) {
 
 async function listSessions(chatId: TelegramChatId) {
   await telegram.sendChatAction(chatId);
-  const cwd = requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
-  const result = await codex.listThreads({ cwd, limit: 10 });
+  const cwd = workspace.requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
+  const result = await codex.listSessions({ cwd, limit: 10 });
   if (!result.data?.length) {
-    await telegram.sendMessage(chatId, `No Codex sessions found in:\n${displayPath(cwd)}`, mainKeyboard());
+    await telegram.sendMessage(chatId, `No Codex sessions found in:\n${workspace.displayPath(cwd)}`, mainKeyboard());
     return;
   }
   const rows = result.data.map((thread, index) => {
     const title = thread.title || thread.name || "(untitled)";
     const cwd = thread.cwd || thread.metadata?.cwd || "";
-    return `${index + 1}. ${title}\n${thread.id}${cwd ? `\n${displayPath(cwd)}` : ""}`;
+    return `${index + 1}. ${title}\n${thread.id}${cwd ? `\n${workspace.displayPath(cwd)}` : ""}`;
   });
-  await telegram.sendMessage(chatId, `Recent Codex sessions in:\n${displayPath(cwd)}\n\n${rows.join("\n\n")}`, mainKeyboard());
+  await telegram.sendMessage(chatId, `Recent Codex sessions in:\n${workspace.displayPath(cwd)}\n\n${rows.join("\n\n")}`, mainKeyboard());
 }
 
 async function showStatus(chatId: TelegramChatId) {
@@ -265,7 +248,7 @@ async function showStatus(chatId: TelegramChatId) {
     chatId,
     [
       `Thread: ${chat.threadId || "(none)"}`,
-      `CWD: ${displayPath(selectedWorkspaceCwd(chatId))}`,
+      `CWD: ${workspace.displayPath(selectedWorkspaceCwd(chatId))}`,
       `Parent: /`,
       `Model: ${settings.model || "(default)"}`,
       `Approval: ${settings.approvalPolicy}`,
@@ -286,7 +269,7 @@ async function stopTurn(chatId: TelegramChatId) {
     await telegram.sendMessage(chatId, "No active Codex turn to stop.", mainKeyboard());
     return;
   }
-  await codex.interruptTurn(chat.threadId);
+  await codex.stopTurn(chat.threadId);
   state.updateChat(chatId, { activeTurnId: null });
   await telegram.sendMessage(chatId, "Stop requested.", mainKeyboard());
 }
@@ -303,12 +286,12 @@ async function sendToCodex(chatId: TelegramChatId, text: string) {
   await telegram.sendChatAction(chatId);
 
   if (chat.activeTurnId) {
-    await codex.steerTurn({ threadId: chat.threadId, turnId: chat.activeTurnId, text });
+    await codex.steerMessage({ sessionId: chat.threadId, turnId: chat.activeTurnId, text });
     return;
   }
 
-  const result = await codex.startTurn({
-    threadId: chat.threadId,
+  const result = await codex.sendMessage({
+    sessionId: chat.threadId,
     text,
     cwd: selectedWorkspaceCwd(chatId),
     model: getChatSettings(chatId).model,
@@ -328,7 +311,7 @@ async function showSettings(chatId: TelegramChatId) {
       `Approval: ${settings.approvalPolicy}`,
       `Sandbox: ${settings.sandbox}`,
       `TG Caveman: ${config.telegramCavemanMode}`,
-      `CWD: ${displayPath(selectedWorkspaceCwd(chatId))}`,
+      `CWD: ${workspace.displayPath(selectedWorkspaceCwd(chatId))}`,
       "",
       "Commands:",
       "/model default",
@@ -376,7 +359,7 @@ async function setCwd(chatId: TelegramChatId, value: string) {
     await telegram.sendMessage(chatId, "Use /workdir to choose a directory.", mainKeyboard());
     return;
   }
-  const cwd = validateAllowedDirectory(value);
+  const cwd = workspace.validateDirectory(value);
   if (!cwd.ok) {
     await telegram.sendMessage(chatId, cwd.message, mainKeyboard());
     return;
@@ -386,7 +369,7 @@ async function setCwd(chatId: TelegramChatId, value: string) {
     return;
   }
   state.updateChat(chatId, { cwd: cwd.path });
-  await telegram.sendMessage(chatId, `CWD set to:\n${displayPath(cwd.path)}`, mainKeyboard());
+  await telegram.sendMessage(chatId, `CWD set to:\n${workspace.displayPath(cwd.path)}`, mainKeyboard());
 }
 
 async function handleCallbackQuery(query: TelegramCallbackQuery) {
@@ -413,7 +396,7 @@ async function handleCallbackQuery(query: TelegramCallbackQuery) {
     return;
   }
 
-  const validation = validateAllowedDirectory(target.path);
+  const validation = workspace.validateDirectory(target.path);
   if (!validation.ok) {
     await telegram.answerCallbackQuery(query.id, validation.message);
     return;
@@ -435,12 +418,12 @@ async function handleCallbackQuery(query: TelegramCallbackQuery) {
 }
 
 async function showWorkdirPicker(chatId: TelegramChatId, cwd: string) {
-  const validation = validateAllowedDirectory(cwd);
+  const validation = workspace.validateDirectory(cwd);
   if (!validation.ok) {
     await telegram.sendMessage(chatId, validation.message, mainKeyboard());
     return;
   }
-  const view = buildWorkdirPicker(validation.path, 0);
+  const view = buildWorkdirPickerView(validation.path, 0);
   await telegram.sendMessage(chatId, view.text, {
     ...mainKeyboard(),
     reply_markup: view.replyMarkup,
@@ -448,7 +431,7 @@ async function showWorkdirPicker(chatId: TelegramChatId, cwd: string) {
 }
 
 async function renderWorkdirPicker(chatId: TelegramChatId, messageId: number, cwd: string, page = 0) {
-  const view = buildWorkdirPicker(cwd, page);
+  const view = buildWorkdirPickerView(cwd, page);
   await telegram.editMessageText(chatId, messageId, view.text, { reply_markup: view.replyMarkup });
 }
 
@@ -481,7 +464,7 @@ async function handleCodexNotification(message: CodexNotification) {
   }
 
   if (message.method === "error") {
-    await telegram.sendMessage(chatId, `${message.method}: ${redactPaths(params.message || JSON.stringify(params))}`);
+    await telegram.sendMessage(chatId, `${message.method}: ${workspace.redactPaths(params.message || JSON.stringify(params))}`);
   }
 }
 
@@ -493,53 +476,6 @@ function flushTurnBuffers(threadId: string, turnId: string, chatId: TelegramChat
   }
 }
 
-function helpText() {
-  return [
-    "Codex remote access commands:",
-    "/new [cwd] - start a new persistent Codex thread",
-    "/resume <thread-id> - resume a session from the selected working directory",
-    "/sessions - list sessions in the selected working directory",
-    "/workdir - choose a working directory under the allowed parent",
-    "/settings - show Codex defaults for this Telegram chat",
-    "/model <model|default> - set model for future turns",
-    "/approval <policy> - set approval policy",
-    "/sandbox <mode> - set sandbox mode for future threads",
-    "/cwd <path> - set working directory under the allowed parent",
-    "/status - show current mapping and CLI resume command",
-    "/stop - interrupt the active Codex turn",
-    "",
-    "Any normal message is sent to the current Codex thread.",
-  ].join("\n");
-}
-
-function mainKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [
-        [{ text: "Workdir" }, { text: "Sessions" }],
-        [{ text: "Status" }, { text: "Settings" }],
-        [{ text: "New Thread" }, { text: "Stop" }],
-        [{ text: "Help" }],
-      ],
-      resize_keyboard: true,
-      is_persistent: true,
-    },
-  };
-}
-
-function commandForButton(text: string) {
-  const commands = {
-    workdir: "/workdir",
-    sessions: "/sessions",
-    status: "/status",
-    settings: "/settings",
-    "new thread": "/new",
-    stop: "/stop",
-    help: "/help",
-  };
-  return commands[text.trim().toLowerCase()] || null;
-}
-
 async function checkRateLimit({
   userId,
   chatId = null,
@@ -549,22 +485,10 @@ async function checkRateLimit({
   chatId?: TelegramChatId | null;
   callbackQueryId?: string | null;
 }) {
-  const now = Date.now();
-  const windowMs = config.rateLimitWindowSeconds * 1000;
-  const bucket = rateLimitBuckets.get(userId) || { resetAt: now + windowMs, count: 0 };
+  const result = rateLimiter.check(userId);
+  if (result.ok) return true;
 
-  if (now >= bucket.resetAt) {
-    bucket.resetAt = now + windowMs;
-    bucket.count = 0;
-  }
-
-  bucket.count += 1;
-  rateLimitBuckets.set(userId, bucket);
-
-  if (bucket.count <= config.rateLimitMaxUpdates) return true;
-
-  const retrySeconds = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
-  const message = `Rate limit hit. Try again in ${retrySeconds}s.`;
+  const message = `Rate limit hit. Try again in ${result.retrySeconds}s.`;
   if (callbackQueryId) {
     await telegram.answerCallbackQuery(callbackQueryId, message);
   } else if (chatId) {
@@ -573,64 +497,8 @@ async function checkRateLimit({
   return false;
 }
 
-function buildWorkdirPicker(cwd: string, page = 0) {
-  const allDirs = listChildDirectories(cwd);
-  const pageCount = Math.max(1, Math.ceil(allDirs.length / WORKDIR_PAGE_SIZE));
-  const safePage = Math.min(Math.max(page, 0), pageCount - 1);
-  const start = safePage * WORKDIR_PAGE_SIZE;
-  const dirs = allDirs.slice(start, start + WORKDIR_PAGE_SIZE);
-  const rows: InlineButton[][] = [];
-
-  if (cwd !== config.parentDir) {
-    rows.push([{ text: "..", callback_data: workdirCallback(resolve(cwd, ".."), { action: "open" }) }]);
-  }
-
-  for (const dir of dirs) {
-    rows.push([{ text: `${basename(dir)}/`, callback_data: workdirCallback(dir, { action: "open" }) }]);
-  }
-
-  const pageButtons: InlineButton[] = [];
-  if (safePage > 0) {
-    pageButtons.push({ text: "Prev", callback_data: workdirCallback(cwd, { action: "page", page: safePage - 1 }) });
-  }
-  if (safePage < pageCount - 1) {
-    pageButtons.push({ text: "More", callback_data: workdirCallback(cwd, { action: "page", page: safePage + 1 }) });
-  }
-  if (pageButtons.length) {
-    rows.push(pageButtons);
-  }
-
-  if (cwd !== config.parentDir) {
-    rows.push([{ text: "Select this directory", callback_data: workdirCallback(cwd, { action: "select" }) }]);
-  }
-
-  return {
-    text: [
-      "Choose Codex working directory",
-      "",
-      "Parent: /",
-      `Selected: ${displayPath(cwd)}`,
-      `Page: ${safePage + 1}/${pageCount}`,
-      "",
-      allDirs.length ? "Open a folder or select this directory." : "No child directories found.",
-    ].join("\n"),
-    replyMarkup: { inline_keyboard: rows },
-  };
-}
-
-function listChildDirectories(dir: string) {
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
-    .map((entry) => resolve(dir, entry.name))
-    .filter(isAllowedPath)
-    .filter((path) => {
-      try {
-        return statSync(path).isDirectory();
-      } catch {
-        return false;
-      }
-    })
-    .sort((a, b) => basename(a).localeCompare(basename(b)));
+function buildWorkdirPickerView(cwd: string, page = 0) {
+  return workdirBrowser.buildPicker(cwd, page, workdirCallback);
 }
 
 function workdirCallback(path: string, metadata: Omit<WorkdirToken, "path"> = {}) {
@@ -639,71 +507,16 @@ function workdirCallback(path: string, metadata: Omit<WorkdirToken, "path"> = {}
   return `wd|${token}`;
 }
 
-function validateAllowedDirectory(value: string): DirectoryValidation {
-  const path = resolve(value);
-  if (!isAllowedPath(path)) {
-    return { ok: false, message: "Path is outside the allowed parent." };
-  }
-  if (!existsSync(path)) return { ok: false, message: `Path does not exist:\n${displayPath(path)}` };
-  const realPath = realpathSync(path);
-  if (!isAllowedPath(realPath)) {
-    return {
-      ok: false,
-      message: "Path resolves outside the allowed parent.",
-    };
-  }
-  try {
-    if (!statSync(realPath).isDirectory()) return { ok: false, message: `Path is not a directory:\n${displayPath(realPath)}` };
-  } catch {
-    return { ok: false, message: `Cannot read directory:\n${displayPath(realPath)}` };
-  }
-  return { ok: true, path: realPath };
-}
-
-function requireAllowedDirectory(value: string) {
-  const validation = validateAllowedDirectory(value);
-  if (!validation.ok) throw new Error(validation.message);
-  return validation.path;
-}
-
-function requireWorkspaceDirectory(value: string) {
-  const path = requireAllowedDirectory(value);
-  if (path === config.parentDir) {
-    throw new Error("Choose a project directory inside / before starting or listing sessions.");
-  }
-  return path;
-}
-
 function selectedWorkspaceCwd(chatId: TelegramChatId) {
   const cwd = state.getChat(chatId).cwd;
-  if (!cwd || cwd === config.parentDir) return config.defaultCwd;
-  return cwd;
-}
-
-function isAllowedPath(path: string) {
-  const resolvedPath = resolve(path);
-  const resolvedParent = resolve(config.parentDir);
-  const rel = relative(resolvedParent, resolvedPath);
-  return rel === "" || (!rel.startsWith("..") && !rel.startsWith("/") && rel !== "..");
-}
-
-function displayPath(path: string) {
-  const resolvedPath = resolve(path);
-  const rel = relative(config.parentDir, resolvedPath);
-  if (rel === "") return "/";
-  if (rel.startsWith("..") || rel.startsWith("/")) return "[outside-parent]";
-  return `/${rel}`;
-}
-
-function redactPaths(text: string) {
-  return String(text).split(config.parentDir).join("");
+  return workspace.selectedWorkspaceCwd(cwd);
 }
 
 async function findThreadInSelectedCwd(chatId: TelegramChatId, threadId: string) {
-  const cwd = requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
+  const cwd = workspace.requireWorkspaceDirectory(selectedWorkspaceCwd(chatId));
   let cursor = null;
   for (let page = 0; page < 5; page += 1) {
-    const result = await codex.listThreads({ cwd, limit: 50, cursor });
+    const result = await codex.listSessions({ cwd, limit: 50, cursor });
     const match = result.data?.find((thread) => thread.id === threadId);
     if (match) return match;
     cursor = result.nextCursor;
@@ -729,8 +542,4 @@ function normalizeDefault(value: string) {
 function telegramDeveloperInstructions() {
   if (config.telegramCavemanMode === "off") return null;
   return `Use caveman ${config.telegramCavemanMode} mode.`;
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

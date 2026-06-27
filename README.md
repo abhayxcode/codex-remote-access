@@ -112,3 +112,41 @@ codex app-server generate-ts --out ./schemas
 
 It is included as a local reference for the app-server method and notification
 shapes used by the bridge.
+
+## Code Structure
+
+```text
+src/
+  main.ts
+  app/
+    TelegramCodexApp.ts
+  agents/
+    types.ts
+    AgentRegistry.ts
+    codex/
+      CodexAgent.ts
+      CodexAppServer.ts
+  config/
+    config.ts
+  core/
+    commands.ts
+  security/
+    RateLimiter.ts
+  state/
+    StateStore.ts
+  transports/
+    Transport.ts
+    TransportRegistry.ts
+    telegram/
+      TelegramClient.ts
+      telegramUi.ts
+  utils/
+    async.ts
+  workspace/
+    WorkdirBrowser.ts
+    WorkspaceScope.ts
+```
+
+`agents/` owns CLI-agent integrations like Codex now and Claude later.
+`transports/` owns chat surfaces like Telegram now and Slack later. Shared
+policy lives in `workspace/`, `security/`, `state/`, and `core/`.
